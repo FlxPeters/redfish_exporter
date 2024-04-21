@@ -1,6 +1,5 @@
 name: build-snapshot
 
-
 # todo: replace with production build later
 on:
   push:
