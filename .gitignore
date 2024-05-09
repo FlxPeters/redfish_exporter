@@ -24,3 +24,6 @@ config.yml
 
 # IDE files
 .vscode
+node_modules/
+package.json
+package-lock.json
