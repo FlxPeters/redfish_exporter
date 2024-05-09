@@ -6,7 +6,7 @@ require (
 	github.com/go-kit/log v0.2.1
 	github.com/golangci/golangci-lint v1.58.1
 	github.com/prometheus/client_golang v1.19.1
-	github.com/prometheus/exporter-toolkit v0.7.2
+	github.com/prometheus/exporter-toolkit v0.11.0
 	github.com/stmcginnis/gofish v0.15.0
 	github.com/stretchr/testify v1.9.0
 	gopkg.in/yaml.v2 v2.4.0
@@ -46,6 +46,7 @@ require (
 	github.com/charithe/durationcheck v0.0.10 // indirect
 	github.com/chavacava/garif v0.1.0 // indirect
 	github.com/ckaznocha/intrange v0.1.2 // indirect
+	github.com/coreos/go-systemd/v22 v22.5.0 // indirect
 	github.com/curioswitch/go-reassign v0.2.0 // indirect
 	github.com/daixiang0/gci v0.13.4 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
@@ -125,7 +126,6 @@ require (
 	github.com/olekukonko/tablewriter v0.0.5 // indirect
 	github.com/pelletier/go-toml v1.9.5 // indirect
 	github.com/pelletier/go-toml/v2 v2.2.2 // indirect
-	github.com/pkg/errors v0.9.1 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/polyfloyd/go-errorlint v1.5.1 // indirect
 	github.com/prometheus/client_model v0.5.0 // indirect
