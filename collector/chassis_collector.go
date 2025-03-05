@@ -17,13 +17,13 @@ var (
 	ChassisSubsystem                  = "chassis"
 	ChassisLabelNames                 = []string{"resource", "chassis_id"}
 	ChassisModel                      = []string{"resource", "chassis_id", "manufacturer", "model", "part_number", "sku"}
-	ChassisTemperatureLabelNames      = []string{"resource", "chassis_id", "sensor", "sensor_id"}
-	ChassisFanLabelNames              = []string{"resource", "chassis_id", "fan", "fan_id", "fan_unit"}
-	ChassisPowerVoltageLabelNames     = []string{"resource", "chassis_id", "power_voltage", "power_voltage_id"}
-	ChassisPowerSupplyLabelNames      = []string{"resource", "chassis_id", "power_supply", "power_supply_id"}
-	ChassisNetworkAdapterLabelNames   = []string{"resource", "chassis_id", "network_adapter", "network_adapter_id"}
-	ChassisNetworkPortLabelNames      = []string{"resource", "chassis_id", "network_adapter", "network_adapter_id", "network_port", "network_port_id", "network_port_type", "network_port_speed", "network_port_connectiont_type", "network_physical_port_number"}
-	ChassisPhysicalSecurityLabelNames = []string{"resource", "chassis_id", "intrusion_sensor_number", "intrusion_sensor_rearm"}
+	ChassisTemperatureLabelNames      = []string{"odataid", "resource", "chassis_id", "sensor", "sensor_id"}
+	ChassisFanLabelNames              = []string{"odataid", "resource", "chassis_id", "fan", "fan_id", "fan_unit"}
+	ChassisPowerVoltageLabelNames     = []string{"odataid", "resource", "chassis_id", "power_voltage", "power_voltage_id"}
+	ChassisPowerSupplyLabelNames      = []string{"odataid", "resource", "chassis_id", "power_supply", "power_supply_id"}
+	ChassisNetworkAdapterLabelNames   = []string{"odataid", "resource", "chassis_id", "network_adapter", "network_adapter_id"}
+	ChassisNetworkPortLabelNames      = []string{"odataid", "resource", "chassis_id", "network_adapter", "network_adapter_id", "network_port", "network_port_id", "network_port_type", "network_port_speed", "network_port_connectiont_type", "network_physical_port_number"}
+	ChassisPhysicalSecurityLabelNames = []string{"odataid", "resource", "chassis_id", "intrusion_sensor_number", "intrusion_sensor_rearm"}
 
 	ChassisLogServiceLabelNames = []string{"chassis_id", "log_service", "log_service_id", "log_service_enabled", "log_service_overwrite_policy"}
 
@@ -257,10 +257,11 @@ func (c *ChassisCollector) Collect(ch chan<- prometheus.Metric) {
 
 func parseChassisTemperature(ch chan<- prometheus.Metric, chassisID string, chassisTemperature redfish.Temperature, wg *sync.WaitGroup) {
 	defer wg.Done()
+	chassisTemperatureSensorODataID := chassisTemperature.ODataID
 	chassisTemperatureSensorName := chassisTemperature.Name
 	chassisTemperatureSensorID := chassisTemperature.MemberID
 	chassisTemperatureStatus := chassisTemperature.Status
-	chassisTemperatureLabelvalues := []string{"temperature", chassisID, chassisTemperatureSensorName, chassisTemperatureSensorID}
+	chassisTemperatureLabelvalues := []string{chassisTemperatureSensorODataID, "temperature", chassisID, chassisTemperatureSensorName, chassisTemperatureSensorID}
 
 	chassisTemperatureStatusHealth := chassisTemperatureStatus.Health
 	if chassisTemperatureStatusHealthValue, ok := parseCommonStatusHealth(chassisTemperatureStatusHealth); ok {
@@ -280,6 +281,7 @@ func parseChassisTemperature(ch chan<- prometheus.Metric, chassisID string, chas
 
 func parseChassisFan(ch chan<- prometheus.Metric, chassisID string, chassisFan redfish.Fan, wg *sync.WaitGroup) {
 	defer wg.Done()
+	chassisFanODataID := chassisFan.ODataID
 	chassisFanID := chassisFan.MemberID
 	chassisFanName := chassisFan.Name
 	chassisFanStaus := chassisFan.Status
@@ -309,7 +311,7 @@ func parseChassisFan(ch chan<- prometheus.Metric, chassisID string, chassisFan r
 	}
 
 	//			chassisFanStatusLabelNames :=[]string{BaseLabelNames,"fan_name","fan_member_id")
-	chassisFanLabelvalues := []string{"fan", chassisID, chassisFanName, chassisFanID, strings.ToLower(string(chassisFanUnit))} // e.g. RPM -> rpm, Percentage -> percentage
+	chassisFanLabelvalues := []string{chassisFanODataID, "fan", chassisID, chassisFanName, chassisFanID, strings.ToLower(string(chassisFanUnit))} // e.g. RPM -> rpm, Percentage -> percentage
 
 	if chassisFanStausHealthValue, ok := parseCommonStatusHealth(chassisFanStausHealth); ok {
 		ch <- prometheus.MustNewConstMetric(chassisMetrics["chassis_fan_health"].desc, prometheus.GaugeValue, chassisFanStausHealthValue, chassisFanLabelvalues...)
@@ -330,11 +332,12 @@ func parseChassisFan(ch chan<- prometheus.Metric, chassisID string, chassisFan r
 
 func parseChassisPowerInfoVoltage(ch chan<- prometheus.Metric, chassisID string, chassisPowerInfoVoltage redfish.Voltage, wg *sync.WaitGroup) {
 	defer wg.Done()
+	chassisPowerInfoVoltageODataID := chassisPowerInfoVoltage.ODataID
 	chassisPowerInfoVoltageName := chassisPowerInfoVoltage.Name
 	chassisPowerInfoVoltageID := chassisPowerInfoVoltage.MemberID
 	chassisPowerInfoVoltageNameReadingVolts := chassisPowerInfoVoltage.ReadingVolts
 	chassisPowerInfoVoltageState := chassisPowerInfoVoltage.Status.State
-	chassisPowerVoltageLabelvalues := []string{"power_voltage", chassisID, chassisPowerInfoVoltageName, chassisPowerInfoVoltageID}
+	chassisPowerVoltageLabelvalues := []string{chassisPowerInfoVoltageODataID, "power_voltage", chassisID, chassisPowerInfoVoltageName, chassisPowerInfoVoltageID}
 	if chassisPowerInfoVoltageStateValue, ok := parseCommonStatusState(chassisPowerInfoVoltageState); ok {
 		ch <- prometheus.MustNewConstMetric(chassisMetrics["chassis_power_voltage_state"].desc, prometheus.GaugeValue, chassisPowerInfoVoltageStateValue, chassisPowerVoltageLabelvalues...)
 	}
@@ -343,15 +346,17 @@ func parseChassisPowerInfoVoltage(ch chan<- prometheus.Metric, chassisID string,
 
 func parseChassisPowerInfoPowerControl(ch chan<- prometheus.Metric, chassisID string, chassisPowerInfoPowerControl redfish.PowerControl, wg *sync.WaitGroup) {
 	defer wg.Done()
+	odataid := chassisPowerInfoPowerControl.ODataID
 	name := chassisPowerInfoPowerControl.Name
 	id := chassisPowerInfoPowerControl.MemberID
 	pm := chassisPowerInfoPowerControl.PowerMetrics
-	chassisPowerVoltageLabelvalues := []string{"power_wattage", chassisID, name, id}
+	chassisPowerVoltageLabelvalues := []string{odataid, "power_wattage", chassisID, name, id}
 	ch <- prometheus.MustNewConstMetric(chassisMetrics["chassis_power_average_consumed_watts"].desc, prometheus.GaugeValue, float64(pm.AverageConsumedWatts), chassisPowerVoltageLabelvalues...)
 }
 
 func parseChassisPowerInfoPowerSupply(ch chan<- prometheus.Metric, chassisID string, chassisPowerInfoPowerSupply redfish.PowerSupply, wg *sync.WaitGroup) {
 	defer wg.Done()
+	chassisPowerInfoPowerSupplyODataID := chassisPowerInfoPowerSupply.ODataID
 	chassisPowerInfoPowerSupplyName := chassisPowerInfoPowerSupply.Name
 	// This is optional in some devices causing duplicate metrics
 	chassisPowerInfoPowerSupplyID := chassisPowerInfoPowerSupply.MemberID
@@ -371,7 +376,7 @@ func parseChassisPowerInfoPowerSupply(ch chan<- prometheus.Metric, chassisID str
 
 	chassisPowerInfoPowerSupplyState := chassisPowerInfoPowerSupply.Status.State
 	chassisPowerInfoPowerSupplyHealth := chassisPowerInfoPowerSupply.Status.Health
-	chassisPowerSupplyLabelvalues := []string{"power_supply", chassisID, chassisPowerInfoPowerSupplyName, chassisPowerInfoPowerSupplyID}
+	chassisPowerSupplyLabelvalues := []string{chassisPowerInfoPowerSupplyODataID, "power_supply", chassisID, chassisPowerInfoPowerSupplyName, chassisPowerInfoPowerSupplyID}
 	if chassisPowerInfoPowerSupplyStateValue, ok := parseCommonStatusState(chassisPowerInfoPowerSupplyState); ok {
 		ch <- prometheus.MustNewConstMetric(chassisMetrics["chassis_power_powersupply_state"].desc, prometheus.GaugeValue, chassisPowerInfoPowerSupplyStateValue, chassisPowerSupplyLabelvalues...)
 	}
@@ -387,11 +392,12 @@ func parseChassisPowerInfoPowerSupply(ch chan<- prometheus.Metric, chassisID str
 
 func parseNetworkAdapter(ch chan<- prometheus.Metric, chassisID string, networkAdapter *redfish.NetworkAdapter, wg *sync.WaitGroup) error {
 	defer wg.Done()
+	networkAdapterODataID := networkAdapter.ODataID
 	networkAdapterName := networkAdapter.Name
 	networkAdapterID := networkAdapter.ID
 	networkAdapterState := networkAdapter.Status.State
 	networkAdapterHealthState := networkAdapter.Status.Health
-	chassisNetworkAdapterLabelValues := []string{"network_adapter", chassisID, networkAdapterName, networkAdapterID}
+	chassisNetworkAdapterLabelValues := []string{networkAdapterODataID, "network_adapter", chassisID, networkAdapterName, networkAdapterID}
 	if networkAdapterStateValue, ok := parseCommonStatusState(networkAdapterState); ok {
 		ch <- prometheus.MustNewConstMetric(chassisMetrics["chassis_network_adapter_state"].desc, prometheus.GaugeValue, networkAdapterStateValue, chassisNetworkAdapterLabelValues...)
 	}
@@ -414,6 +420,7 @@ func parseNetworkAdapter(ch chan<- prometheus.Metric, chassisID string, networkA
 
 func parseNetworkPort(ch chan<- prometheus.Metric, chassisID string, networkPort *redfish.NetworkPort, networkAdapterName string, networkAdapterID string, wg *sync.WaitGroup) {
 	defer wg.Done()
+	networkPortODataID := networkPort.ODataID
 	networkPortName := networkPort.Name
 	networkPortID := networkPort.ID
 	networkPortState := networkPort.Status.State
@@ -423,7 +430,7 @@ func parseNetworkPort(ch chan<- prometheus.Metric, chassisID string, networkPort
 	networkPortHealthState := networkPort.Status.Health
 	networkPortConnectionType := networkPort.FCPortConnectionType
 	networkPhysicalPortNumber := networkPort.PhysicalPortNumber
-	chassisNetworkPortLabelValues := []string{"network_port", chassisID, networkAdapterName, networkAdapterID, networkPortName, networkPortID, string(networkPortLinkType), networkPortLinkSpeed, string(networkPortConnectionType), networkPhysicalPortNumber}
+	chassisNetworkPortLabelValues := []string{networkPortODataID, "network_port", chassisID, networkAdapterName, networkAdapterID, networkPortName, networkPortID, string(networkPortLinkType), networkPortLinkSpeed, string(networkPortConnectionType), networkPhysicalPortNumber}
 
 	if networkLinkStatusValue, ok := parsePortLinkStatus(networkLinkStatus); ok {
 		ch <- prometheus.MustNewConstMetric(chassisMetrics["chassis_network_port_link_state"].desc, prometheus.GaugeValue, networkLinkStatusValue, chassisNetworkPortLabelValues...)

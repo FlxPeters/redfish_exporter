@@ -120,6 +120,10 @@ Prior to the fork (should also work now):
 
 Since the fork:
 
+- DELL PowerEdge R760 (iDRAC)
+- DELL PowerVault ME5024
+- Fujitsu PRIMERGY RX2540 M2 (iRMC S4 9.69F)
+- Fujitsu PRIMERGY RX2540 M5 (iRMC S5 3.60P)
 - GIGABYTE R263-Z32 (AMI MegaRAC SP-X)
 
 ## Why a Fork?
