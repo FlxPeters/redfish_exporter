@@ -7,7 +7,7 @@ require (
 	github.com/golangci/golangci-lint v1.58.1
 	github.com/prometheus/client_golang v1.19.1
 	github.com/prometheus/exporter-toolkit v0.7.2
-	github.com/stmcginnis/gofish v0.15.0
+	github.com/stmcginnis/gofish v0.20.0
 	github.com/stretchr/testify v1.9.0
 	gopkg.in/yaml.v2 v2.4.0
 )
