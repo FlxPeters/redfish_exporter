@@ -61,25 +61,30 @@ var (
 	}
 )
 
+// keyDelimiter separates nested config keys inside viper. Viper's default is ".", which
+// would split map keys that legitimately contain dots: a platform key such as
+// "EXAMPLE-SKU-1.02.03" or a per-host key such as "192.168.100.1".
+const keyDelimiter = "::"
+
 // newViperInstance returns a Viper instance configured with AutomaticEnv.
 // If envPrefix is non-empty, it is set as the env prefix (e.g. "MYPREFIX"
 // causes MYPREFIX_LOGLEVEL to map to loglevel).
-// The key replacer maps "." → "_" so nested keys like
-// "redfish_client.dial_timeout" map to env var "REDFISH_CLIENT_DIAL_TIMEOUT".
+// The key replacer maps the key delimiter → "_" so nested keys like
+// "redfish_client::dial_timeout" map to env var "REDFISH_CLIENT_DIAL_TIMEOUT".
 func newViperInstance(envPrefix string) *viper.Viper {
-	v := viper.New()
+	v := viper.NewWithOptions(viper.KeyDelimiter(keyDelimiter))
 	if envPrefix != "" {
 		v.SetEnvPrefix(envPrefix)
 	}
-	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+	v.SetEnvKeyReplacer(strings.NewReplacer(keyDelimiter, "_"))
 	v.AutomaticEnv()
 
 	v.SetDefault("loglevel", "")
 	v.SetDefault("shutdown_timeout", 60*time.Second)
-	v.SetDefault("redfish_client.max_concurrent_requests", DefaultRedfishConfig.MaxConcurrentRequests)
-	v.SetDefault("redfish_client.dial_timeout", DefaultRedfishConfig.DialTimeout)
-	v.SetDefault("redfish_client.response_header_timeout", DefaultRedfishConfig.ResponseHeaderTimeout)
-	v.SetDefault("redfish_client.logout_timeout", DefaultRedfishConfig.LogoutTimeout)
+	v.SetDefault("redfish_client::max_concurrent_requests", DefaultRedfishConfig.MaxConcurrentRequests)
+	v.SetDefault("redfish_client::dial_timeout", DefaultRedfishConfig.DialTimeout)
+	v.SetDefault("redfish_client::response_header_timeout", DefaultRedfishConfig.ResponseHeaderTimeout)
+	v.SetDefault("redfish_client::logout_timeout", DefaultRedfishConfig.LogoutTimeout)
 
 	return v
 }
@@ -166,14 +171,25 @@ type RedfishClientConfig struct {
 	LogoutTimeout time.Duration `mapstructure:"logout_timeout"`
 }
 
+// PlatformConfig is what config.yml declares for one server type under `platforms:`. The
+// key is "<server_sku>-<firmware_version>" and must also be a key of the exporter's platform
+// table (internal/collector/platform.go), which holds the code paths for it. The loader
+// lowercases map keys, so lookups are case-insensitive.
+type PlatformConfig struct {
+	// Modules a scrape that names this platform runs, in place of any module= parameters on
+	// the request. Each must be defined under `modules:`, and the list must not be empty.
+	Modules []string `mapstructure:"modules"`
+}
+
 // Config represents the redfish_exporter config file
 type Config struct {
-	Hosts           map[string]HostConfig `mapstructure:"hosts"`
-	Groups          map[string]HostConfig `mapstructure:"groups"`
-	Loglevel        string                `mapstructure:"loglevel"`
-	ShutdownTimeout time.Duration         `mapstructure:"shutdown_timeout"`
-	Modules         map[string]Module     `mapstructure:"modules"`
-	RedfishClient   RedfishClientConfig   `mapstructure:"redfish_client"`
+	Hosts           map[string]HostConfig     `mapstructure:"hosts"`
+	Groups          map[string]HostConfig     `mapstructure:"groups"`
+	Loglevel        string                    `mapstructure:"loglevel"`
+	ShutdownTimeout time.Duration             `mapstructure:"shutdown_timeout"`
+	Modules         map[string]Module         `mapstructure:"modules"`
+	Platforms       map[string]PlatformConfig `mapstructure:"platforms"`
+	RedfishClient   RedfishClientConfig       `mapstructure:"redfish_client"`
 }
 
 // Validate runs end-of-parsing validations against a Config.
@@ -181,6 +197,16 @@ func (c *Config) Validate() error {
 	for modName, mod := range c.Modules {
 		if err := mod.Validate(); err != nil {
 			return fmt.Errorf("module %s is not valid: %w", modName, err)
+		}
+	}
+	for name, platform := range c.Platforms {
+		if len(platform.Modules) == 0 {
+			return fmt.Errorf("platform %s lists no modules", name)
+		}
+		for _, module := range platform.Modules {
+			if _, ok := c.Modules[module]; !ok {
+				return fmt.Errorf("platform %s lists module %s, which is not defined under modules", name, module)
+			}
 		}
 	}
 	return nil
@@ -257,6 +283,15 @@ func (sc *SafeConfig) HostConfigForGroup(group string) (*HostConfig, error) {
 		return &hostConfig, nil
 	}
 	return &HostConfig{}, fmt.Errorf("no credentials found for group %s", group)
+}
+
+// PlatformModules returns the modules config.yml lists for a platform, and whether the
+// platform is declared there at all. Keys are case-insensitive: the loader lowercases them.
+func (sc *SafeConfig) PlatformModules(name string) ([]string, bool) {
+	sc.Lock()
+	defer sc.Unlock()
+	platform, ok := sc.Config.Platforms[strings.ToLower(name)]
+	return platform.Modules, ok
 }
 
 func (sc *SafeConfig) RedfishClientConfig() RedfishClientConfig {

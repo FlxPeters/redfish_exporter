@@ -319,7 +319,7 @@ func TestSystemCollectorBiosInfo(t *testing.T) {
 	// and must be filtered out.
 	require.Len(t, biosInfoLabels, 1, "expected exactly one host bios_info series")
 	require.Equal(t, "2.4b", biosInfoLabels[0]["bios_version"])
-	require.Equal(t, "SYS-A21GE-NBRT-01-LL014", biosInfoLabels[0]["model"])
+	require.Equal(t, "EXAMPLE-MODEL-01", biosInfoLabels[0]["model"])
 }
 
 // TestDuplicateDriveListingGathers reproduces BMC firmwares that list the

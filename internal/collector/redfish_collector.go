@@ -270,6 +270,8 @@ func newRedfishClient(ctx context.Context, host string, username string, passwor
 			}
 			return nil
 		}))
+	// Outermost, so the HTTP client metrics count only requests that reach the BMC.
+	redfishClient.HTTPClient.Transport = newScrapeCache(redfishClient.HTTPClient.Transport)
 	return redfishClient, nil
 }
 

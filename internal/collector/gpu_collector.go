@@ -53,6 +53,8 @@ type GPUCollector struct {
 	logger                *slog.Logger
 	collectorScrapeStatus *prometheus.GaugeVec
 	oemClient             *NvidiaOEMClient
+	// nvlink is the platform's NVLink read; see Platform.
+	nvlink func(*GPUCollector, context.Context, SystemGPU) (GPUNVLinkCollection, error)
 }
 
 func createGPUMetricMap() map[string]Metric {
@@ -124,7 +126,14 @@ func NewGPUCollector(collectorName string, redfishClient *gofish.APIClient, logg
 			[]string{"collector"},
 		),
 		oemClient: NewNvidiaOEMClient(redfishClient.GetService().GetClient(), logger),
+		nvlink:    Default.NVLink,
 	}, nil
+}
+
+// SetPlatform takes the cells this collector routes on. It keeps the functions, not the
+// Platform, so nothing in the collector can branch on a platform's name.
+func (g *GPUCollector) SetPlatform(p Platform) {
+	g.nvlink = p.NVLink
 }
 
 func (g *GPUCollector) whileContextAllows(ctx context.Context, fns ...func()) {
@@ -432,22 +441,32 @@ func (g *GPUCollector) emitGPUOem(ch chan<- prometheus.Metric, gpu SystemGPU, pr
 	}
 }
 
-func (g *GPUCollector) emitNVLinkTelemetry(ctx context.Context, ch chan<- prometheus.Metric, gpu SystemGPU) {
-	rfClient := g.redfishClient.WithContext(ctx)
-	rfPath := fmt.Sprintf(`%s/Ports?$expand=.($levels=2)`, gpu.ODataID)
+// nvlinkPortsExpand reads a GPU's Ports collection with the ports and their Metrics
+// expanded inline, one request per GPU.
+func (g *GPUCollector) nvlinkPortsExpand(ctx context.Context, gpu SystemGPU) (GPUNVLinkCollection, error) {
+	var agg GPUNVLinkCollection
+	err := getJSON(g.redfishClient.WithContext(ctx), fmt.Sprintf(`%s/Ports?$expand=.($levels=2)`, gpu.ODataID), &agg)
+	return agg, err
+}
+
+// getJSON GETs a Redfish path and decodes the body into v.
+func getJSON(rfClient *gofish.APIClient, rfPath string, v any) error {
 	response, err := rfClient.Get(rfPath)
 	if err != nil {
-		g.logger.With("error", err, "gpu_id", gpu.ID, "system_name", gpu.SystemName).Error("unable to gather NVLink data, skipping")
-		return
+		return err
 	}
+	defer response.Body.Close() // nolint:errcheck // Close() errors on read are not actionable
 	body, err := io.ReadAll(response.Body)
 	if err != nil {
-		g.logger.With("error", err, "gpu_id", gpu.ID, "system_name", gpu.SystemName).Error("unable to read in NVLink data, skipping")
-		return
+		return err
 	}
-	var agg GPUNVLinkCollection
-	if err := json.Unmarshal(body, &agg); err != nil {
-		g.logger.With("error", err, "gpu_id", gpu.ID, "system_name", gpu.SystemName).Error("unable to unmarshal NVLink data, skipping")
+	return json.Unmarshal(body, v)
+}
+
+func (g *GPUCollector) emitNVLinkTelemetry(ctx context.Context, ch chan<- prometheus.Metric, gpu SystemGPU) {
+	agg, err := g.nvlink(g, ctx, gpu)
+	if err != nil {
+		g.logger.With("error", err, "gpu_id", gpu.ID, "system_name", gpu.SystemName).Error("unable to gather NVLink data, skipping")
 		return
 	}
 	for _, port := range agg.Members {

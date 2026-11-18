@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/LambdaLabs/redfish_exporter/internal/collector"
 	"github.com/LambdaLabs/redfish_exporter/internal/config"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stmcginnis/gofish"
@@ -353,8 +354,48 @@ func TestBuildCollectorsFor(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			rfClient := newTestGofishClient(t)
-			collectors := buildCollectorsFor(context.Background(), tc.modules, tc.moduleConfig, rfClient, slog.Default())
+			collectors := buildCollectorsFor(context.Background(), tc.modules, tc.moduleConfig, rfClient, slog.Default(), collector.Default)
 			assert.Equal(t, tc.expected, len(collectors), "unexpected number of collectors")
 		})
 	}
+}
+
+func TestModulesFor(t *testing.T) {
+	sc := config.NewSafeConfig("")
+	// Keys are lowercase, as the config loader stores them; lookups are case-insensitive.
+	sc.Config.Platforms = map[string]config.PlatformConfig{
+		"sys-test-1.0":  {Modules: []string{"chassis", "gpu"}},
+		"sys-empty-1.0": {},
+	}
+
+	logger := slog.Default()
+	none := []string(nil)
+	requested := []string{"system"}
+
+	assert.Equal(t, []string{"rf_exporter_default"}, modulesFor("", none, sc, logger), "no platform, no modules: default bundle")
+	assert.Equal(t, requested, modulesFor("", requested, sc, logger), "no platform: the request's modules")
+	assert.Equal(t, []string{"chassis", "gpu"}, modulesFor("SYS-TEST-1.0", none, sc, logger), "platform with a stanza: its modules")
+	assert.Equal(t, []string{"chassis", "gpu"}, modulesFor("SYS-TEST-1.0", requested, sc, logger), "platform with a stanza beats the request's modules")
+	assert.Equal(t, []string{"rf_exporter_default"}, modulesFor("SYS-EMPTY-1.0", none, sc, logger), "stanza without modules (rejected at load; defensive): default bundle")
+	assert.Equal(t, requested, modulesFor("SYS-UNKNOWN-1.0", requested, sc, logger), "platform without a stanza: the request's modules")
+	assert.Equal(t, []string{"rf_exporter_default"}, modulesFor("SYS-UNKNOWN-1.0", none, sc, logger), "platform without a stanza, no modules: default bundle")
+
+	assert.Equal(t, []string{"chassis", "gpu", "telemetry"}, modulesFor("SYS-UNKNOWN-1.0", []string{"chassis,gpu,telemetry"}, sc, logger), "one comma-separated value: each module")
+	assert.Equal(t, []string{"chassis", "gpu", "system"}, modulesFor("", []string{"chassis, gpu", "system"}, sc, logger), "comma-separated and repeated values together, spaces trimmed")
+	assert.Equal(t, []string{"rf_exporter_default"}, modulesFor("", []string{",", " "}, sc, logger), "only empty entries: default bundle")
+	assert.Equal(t, []string{"chassis", "gpu"}, modulesFor("SYS-TEST-1.0", []string{"system,telemetry"}, sc, logger), "platform with a stanza beats a comma-separated list too")
+}
+
+// TestModulesFor_UnknownInList: an unknown name inside a comma-separated list is dropped and
+// counted, as it is when sent as its own module= parameter.
+func TestModulesFor_UnknownInList(t *testing.T) {
+	modules := modulesFor("", []string{"chassis_collector,nonexistent"}, config.NewSafeConfig(""), slog.Default())
+	require.Equal(t, []string{"chassis_collector", "nonexistent"}, modules)
+
+	before := testutil.ToFloat64(collectorModuleUnknown)
+	moduleConfig := map[string]config.Module{"chassis_collector": {Prober: "chassis_collector"}}
+	collectors := buildCollectorsFor(context.Background(), modules, moduleConfig, newTestGofishClient(t), slog.Default(), collector.Default)
+
+	assert.Len(t, collectors, 1)
+	assert.Equal(t, before+1, testutil.ToFloat64(collectorModuleUnknown))
 }

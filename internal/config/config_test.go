@@ -406,3 +406,50 @@ map(.help = "Value yielded from the Redfish API /Chassis/PowerShelf_0, expanded 
 		})
 	}
 }
+
+func TestPlatformsConfig(t *testing.T) {
+	cfg, err := readConfigFrom(bytes.NewBufferString(`
+modules:
+  chassis:
+    prober: chassis_collector
+  gpu:
+    prober: gpu_collector
+platforms:
+  SYS-TEST-1.0:
+    modules: [chassis, gpu]
+  default:
+    modules: [chassis]
+`), "")
+	assert.NoError(t, err)
+	// viper lowercases map keys; a dotted firmware version must survive as one key.
+	assert.Equal(t, []string{"chassis", "gpu"}, cfg.Platforms["sys-test-1.0"].Modules)
+	assert.Equal(t, []string{"chassis"}, cfg.Platforms["default"].Modules)
+
+	sc := NewSafeConfig("")
+	sc.Config = cfg
+	modules, ok := sc.PlatformModules("SYS-TEST-1.0")
+	assert.True(t, ok)
+	assert.Equal(t, []string{"chassis", "gpu"}, modules)
+	_, ok = sc.PlatformModules("SYS-OTHER-1.0")
+	assert.False(t, ok)
+
+	_, err = readConfigFrom(bytes.NewBufferString(`
+modules:
+  chassis:
+    prober: chassis_collector
+platforms:
+  SYS-TEST-1.0:
+    modules: [chassis, nonexistent]
+`), "")
+	assert.ErrorContains(t, err, "platform sys-test-1.0 lists module nonexistent")
+
+	_, err = readConfigFrom(bytes.NewBufferString(`
+modules:
+  chassis:
+    prober: chassis_collector
+platforms:
+  SYS-TEST-1.0:
+    modules: []
+`), "")
+	assert.ErrorContains(t, err, "platform sys-test-1.0 lists no modules")
+}

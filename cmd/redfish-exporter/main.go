@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -66,6 +67,12 @@ var (
 		Name: "redfish_exporter_unknown_modules_requested_total",
 		Help: "Count of requests specifying a module name not known to this exporter",
 	})
+	// platformUnknown counts requests whose platform= names a key the exporter's platform table
+	// does not have; those scrapes run as the default platform.
+	platformUnknown = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "redfish_exporter_unknown_platforms_requested_total",
+		Help: "Count of requests specifying a platform not in this exporter's platform table",
+	})
 	// scrapeSuccessesTotal counts scrapes where all sub-collectors completed without failure.
 	scrapeSuccessesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "redfish_exporter_scrape_successes_total",
@@ -82,6 +89,7 @@ func reloadHandler() http.HandlerFunc {
 				slog.Error("failed to reload config file", slog.Any("error", err))
 				http.Error(w, "failed to reload config file", http.StatusInternalServerError)
 			}
+			logUnknownPlatforms(safeConfig)
 			slog.Info("config file reloaded", slog.String("operation", "sc.ReloadConfig"))
 
 			w.WriteHeader(http.StatusOK)
@@ -95,12 +103,27 @@ func reloadHandler() http.HandlerFunc {
 	}
 }
 
+// logUnknownPlatforms reports every platforms: key in the loaded config that this build's
+// platform table does not have. Such a platform still scrapes, as default, so this is the
+// place a typo or a missing table row shows up.
+func logUnknownPlatforms(sc *config.SafeConfig) {
+	sc.Lock()
+	defer sc.Unlock()
+	for name := range sc.Config.Platforms {
+		if _, known := collector.PlatformByName(name); !known {
+			slog.Error("config declares a platform this exporter's table does not know; scrapes of it run as default",
+				slog.String("platform", name), slog.Any("known_platforms", collector.PlatformNames()))
+		}
+	}
+}
+
 // registerMetaMetrics registers 'meta' metrics for the redfish_exporter.
 // 'meta' metrics include details like "which collectors errored during creation?"
 func registerMetaMetrics() {
 	custom := []prometheus.Collector{
 		collectorLastStatus,
 		collectorModuleUnknown,
+		platformUnknown,
 		scrapeSuccessesTotal,
 	}
 	custom = append(custom, collector.SessionMetrics()...)
@@ -111,6 +134,7 @@ func registerMetaMetrics() {
 type scrapeRequest struct {
 	Target     string
 	Modules    []string
+	Platform   string
 	HostConfig *config.HostConfig
 }
 
@@ -136,10 +160,10 @@ func mustScrapeRequest(next http.Handler) http.Handler {
 			http.Error(w, "'target' parameter must be specified", 400)
 			return
 		}
-		modules, modulesDefined := urlQuery["module"]
-		if !modulesDefined || len(modules) == 0 {
+		platformName := urlQuery.Get("platform")
+		modules := modulesFor(platformName, urlQuery["module"], safeConfig, ctxLogger)
+		if modules[0] == "rf_exporter_default" {
 			ctxLogger.Debug("incoming request included no modules. using default modules, and a future release will result in failed collection without one or more modules configured and provided")
-			modules = []string{"rf_exporter_default"}
 		}
 
 		ctxLogger.Debug("Scraping target host", slog.String("target", target))
@@ -169,12 +193,48 @@ func mustScrapeRequest(next http.Handler) http.Handler {
 		sr := &scrapeRequest{
 			Target:     target,
 			Modules:    modules,
+			Platform:   platformName,
 			HostConfig: hostConfig,
 		}
 		ctx := context.WithValue(r.Context(), scrapeRequestCtxKey, sr)
 		ctx = ctxlog.NewContext(ctx, ctxLogger)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// modulesFor decides the modules a scrape runs. A request that names a platform with a
+// stanza in config.yml runs that stanza's modules; any module= params on such a request are
+// ignored, with a warning. A request that names no platform, or names one without a stanza,
+// runs its module= params, else the default bundle. A module= value may list several modules
+// separated by commas, since a relabel rule in a scrape job can set only one value.
+func modulesFor(platformName string, requested []string, sc *config.SafeConfig, logger *slog.Logger) []string {
+	requested = splitModules(requested)
+	if platformName != "" {
+		if modules, ok := sc.PlatformModules(platformName); ok && len(modules) > 0 {
+			if len(requested) > 0 {
+				logger.Warn("request named both a platform and modules; the platform's modules win",
+					slog.String("platform", platformName), slog.Any("ignored_modules", requested))
+			}
+			return modules
+		}
+	}
+	if len(requested) > 0 {
+		return requested
+	}
+	return []string{"rf_exporter_default"}
+}
+
+// splitModules splits each module= value on commas, trimming spaces and dropping empty entries.
+func splitModules(values []string) []string {
+	var modules []string
+	for _, value := range values {
+		for _, module := range strings.Split(value, ",") {
+			if module = strings.TrimSpace(module); module != "" {
+				modules = append(modules, module)
+			}
+		}
+	}
+	return modules
 }
 
 func getScrapeRequest(r *http.Request) (*scrapeRequest, bool) {
@@ -221,7 +281,20 @@ func metricsHandler() http.HandlerFunc {
 		// limited slots until the BMC's own idle timeout reclaims it.
 		defer aggregateCollector.Close()
 
-		collectors := buildCollectorsFor(r.Context(), sr.Modules, safeConfig.GetModules(), aggregateCollector.Client(), scrapeLogger)
+		platform, known := collector.PlatformByName(sr.Platform)
+		if sr.Platform != "" && !known {
+			platformUnknown.Inc()
+			scrapeLogger.Warn("platform is not in the exporter's table, running as default", slog.String("platform", sr.Platform))
+		}
+		scrapeLogger.Info("platform selected", slog.String("platform", platform.Name), slog.String("requested", sr.Platform))
+		platformInfo := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "redfish_exporter_platform_info",
+			Help: "The platform this scrape ran as, and the platform the request named: requested is empty when the request named none, and platform is default when it named one the exporter's table does not know.",
+		}, []string{"platform", "requested"})
+		platformInfo.WithLabelValues(platform.Name, sr.Platform).Set(1)
+		registry.MustRegister(platformInfo)
+
+		collectors := buildCollectorsFor(r.Context(), sr.Modules, safeConfig.GetModules(), aggregateCollector.Client(), scrapeLogger, platform)
 		aggregateCollector.WithCollectors(collectors)
 		registry.MustRegister(aggregateCollector)
 		gatherers := prometheus.Gatherers{
@@ -243,7 +316,7 @@ func metricsHandler() http.HandlerFunc {
 // For ease onboarding from existing redfish_exporter deployments,
 // a modules[0] == "rf_exporter_default" will yield a []prometheus.Collector defined
 // in this function. Future relases will remove this behavior and require user input.
-func buildCollectorsFor(ctx context.Context, modules []string, moduleConfig map[string]config.Module, rfClient *gofish.APIClient, logger *slog.Logger) []collector.ContextAwareCollector {
+func buildCollectorsFor(ctx context.Context, modules []string, moduleConfig map[string]config.Module, rfClient *gofish.APIClient, logger *slog.Logger, platform collector.Platform) []collector.ContextAwareCollector {
 	if modules[0] == "rf_exporter_default" {
 		logger.Warn("Using default collector bundle. In a future release, the exporter will require configuration of one or more modules.")
 		return buildCollectorsFor(ctx, []string{
@@ -252,13 +325,13 @@ func buildCollectorsFor(ctx context.Context, modules []string, moduleConfig map[
 			"manager_collector",
 			"system_collector",
 			"telemetry_collector",
-		}, config.DefaultModuleConfig, rfClient, logger)
+		}, config.DefaultModuleConfig, rfClient, logger, platform)
 	}
 	c := []collector.ContextAwareCollector{}
 	for _, module := range modules {
 		if modConfig, found := moduleConfig[module]; found {
 			collectorClient := rfClient.WithContext(collector.ContextWithCollector(ctx, module))
-			collector, err := collector.NewCollectorFromModule(module, &modConfig, collectorClient, logger)
+			collector, err := collector.NewCollectorFromModule(module, &modConfig, collectorClient, logger, platform)
 			if err != nil {
 				logger.Error("unable to create collector", slog.Any("error", err))
 				collectorLastStatus.WithLabelValues(module).Set(0)
@@ -308,6 +381,7 @@ func runMain() error {
 	if err := safeConfig.ReloadConfig(*configFile); err != nil {
 		return fmt.Errorf("error parsing config file: %w", err)
 	}
+	logUnknownPlatforms(safeConfig)
 
 	registerMetaMetrics()
 	// Setup dinal logger from config
@@ -332,6 +406,7 @@ func runMain() error {
 					slog.Error("failed to reload config file", slog.Any("error", err))
 					break
 				}
+				logUnknownPlatforms(safeConfig)
 				slog.Info("config file reload", slog.String("operation", "sc.ReloadConfig"))
 			case rc := <-reloadCh:
 				if err := safeConfig.ReloadConfig(*configFile); err != nil {
@@ -339,6 +414,7 @@ func runMain() error {
 					rc <- err
 					break
 				}
+				logUnknownPlatforms(safeConfig)
 				slog.Info("config file reloaded", slog.String("operation", "sc.ReloadConfig"))
 				rc <- nil
 			}
@@ -379,6 +455,7 @@ func runMain() error {
             <label>Target:</label> <input type="text" name="target" placeholder="X.X.X.X" value="1.2.3.4"><br>
             <label>Group:</label> <input type="text" name="group" placeholder="group (optional)" value=""><br>
             <label>Module:</label> <input type="text" name="module" placeholder="module (optional)" value=""><br>
+            <label>Platform:</label> <input type="text" name="platform" placeholder="platform (optional)" value=""><br>
             <input type="submit" value="Submit">
 						</form>
 						<p><a href="/metrics">Local metrics</a></p>

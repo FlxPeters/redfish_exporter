@@ -3,10 +3,13 @@ package collector
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"path"
 	"strconv"
 	"strings"
+	"sync/atomic"
 
 	"github.com/prometheus/client_golang/prometheus"
 	isoDuration "github.com/sosodev/duration"
@@ -297,8 +300,7 @@ func (t *TelemetryCollector) collect(ctx context.Context, ch chan<- prometheus.M
 		return
 	}
 
-	// Get all metric reports
-	metricReports, err := telemetryService.MetricReports()
+	reportLinks, err := metricReportLinks(t.redfishClient.Service.GetClient(), telemetryService)
 	if err != nil {
 		// MetricReports may not be available on all TelemetryService implementations
 		if strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "not found") {
@@ -331,50 +333,87 @@ func (t *TelemetryCollector) collect(ctx context.Context, ch chan<- prometheus.M
 		}
 	}
 
-	// Process each metric report
+	// Fetch and process each metric report this collector parses. The collection can list
+	// many it does not, and each is a request.
+	var fetchFailed atomic.Bool
 	eg := newRecoverGroup(ctx)
-	for _, report := range metricReports {
+	for _, link := range reportLinks {
 		if ctx.Err() != nil {
 			t.logger.With("error", ctx.Err(), "collector", "telemetry").Debug("skipping further collection")
 			continue
 		}
-		if strings.Contains(report.ID, reportIDProcessorGPMMetrics) {
-			eg.Go(func() error {
-				t.collectGPMMetrics(ch, report, systemMap)
-				return nil
-			})
-		} else if strings.Contains(report.ID, reportIDProcessorMetrics) && !strings.Contains(report.ID, reportIDProcessorResetMetrics) && !strings.Contains(report.ID, reportIDProcessorPortMetrics) {
-			eg.Go(func() error {
-				t.collectProcessorMetrics(ch, report, systemMap)
-				return nil
-			})
-		} else if strings.Contains(report.ID, reportIDMemoryMetrics) {
-			eg.Go(func() error {
-				t.collectMemoryMetrics(ch, report, systemMap)
-				return nil
-			})
-		} else if strings.Contains(report.ID, reportIDProcessorResetMetrics) {
-			eg.Go(func() error {
-				t.collectResetMetrics(ch, report, systemMap)
-				return nil
-			})
-		} else if strings.Contains(report.ID, reportIDProcessorPortMetrics) {
-			eg.Go(func() error {
-				t.collectPortMetrics(ch, report, systemMap)
-				return nil
-			})
-		} else if strings.Contains(report.ID, reportIDPlatformEnvMetrics) {
-			eg.Go(func() error {
-				t.collectPlatformEnvironmentMetrics(ch, report, systemMap)
-				return nil
-			})
+		if t.reportParser(path.Base(link)) == nil {
+			continue
 		}
+		eg.Go(func() error {
+			report, err := schemas.GetMetricReport(t.redfishClient.Service.GetClient(), link)
+			if err != nil {
+				t.logger.Error("failed to get metric report", slog.String("report", link), slog.Any("error", err))
+				fetchFailed.Store(true)
+				return nil
+			}
+			if parse := t.reportParser(report.ID); parse != nil {
+				parse(ch, report, systemMap)
+			}
+			return nil
+		})
 	}
 
 	if err := eg.Wait(); err != nil {
 		t.logger.Error("goroutine error", slog.Any("error", err))
 	}
+	// A report that failed to fetch leaves the status at 0; the reports that answered are kept.
+	if fetchFailed.Load() {
+		return
+	}
 	t.collectorScrapeStatus.WithLabelValues("telemetry").Set(float64(1))
+}
+
+// metricReportLinks lists the members of the TelemetryService's MetricReports collection
+// without fetching them.
+func metricReportLinks(client schemas.Client, telemetryService *schemas.TelemetryService) ([]string, error) {
+	var links struct {
+		MetricReports schemas.Link `json:"MetricReports"`
+	}
+	if err := json.Unmarshal(telemetryService.RawData, &links); err != nil {
+		return nil, err
+	}
+	if links.MetricReports == "" {
+		return nil, nil
+	}
+	// A BMC can page the collection; a next link already read ends the walk.
+	var reportLinks []string
+	seen := map[string]bool{}
+	for uri := links.MetricReports.String(); uri != "" && !seen[uri]; {
+		seen[uri] = true
+		collection, err := schemas.GetCollection(client, uri)
+		if err != nil {
+			return nil, err
+		}
+		reportLinks = append(reportLinks, collection.ItemLinks...)
+		uri = collection.MembersNextLink
+	}
+	return reportLinks, nil
+}
+
+// reportParser returns the function that processes the metric report with this ID, or nil for
+// a report this collector does not parse.
+func (t *TelemetryCollector) reportParser(id string) func(chan<- prometheus.Metric, *schemas.MetricReport, map[string]string) {
+	switch {
+	case strings.Contains(id, reportIDProcessorGPMMetrics):
+		return t.collectGPMMetrics
+	case strings.Contains(id, reportIDProcessorMetrics) && !strings.Contains(id, reportIDProcessorResetMetrics) && !strings.Contains(id, reportIDProcessorPortMetrics):
+		return t.collectProcessorMetrics
+	case strings.Contains(id, reportIDMemoryMetrics):
+		return t.collectMemoryMetrics
+	case strings.Contains(id, reportIDProcessorResetMetrics):
+		return t.collectResetMetrics
+	case strings.Contains(id, reportIDProcessorPortMetrics):
+		return t.collectPortMetrics
+	case strings.Contains(id, reportIDPlatformEnvMetrics):
+		return t.collectPlatformEnvironmentMetrics
+	}
+	return nil
 }
 
 // collectProcessorMetrics processes a single HGX_ProcessorMetrics report

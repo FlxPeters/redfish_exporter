@@ -44,3 +44,16 @@ modules:
     prober: system_collector
   telemetry:
     prober: telemetry_collector
+
+# The platforms map declares the server types this deployment scrapes, keyed
+# "<server_sku>-<firmware_version>", and the modules a scrape of each runs. A request that
+# names a platform (the 'platform' HTTP query parameter) runs that platform's modules; any
+# 'module' parameters on such a request are ignored. The key must also be in the exporter's
+# platform table (internal/collector/platform.go), which holds the code paths for that
+# server type; a key the table does not know runs as "default". Every module listed must
+# be defined under modules above, and a stanza must list at least one module. A request
+# that names no platform reads no stanza, not even 'default', which applies only to
+# requests that send platform=default. See docs/platforms.md.
+platforms:
+  default:
+    modules: [chassis, gpu, manager, system, telemetry]
