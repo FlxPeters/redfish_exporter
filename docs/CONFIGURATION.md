@@ -13,6 +13,7 @@ hosts:
 groups:
   [ <string>: <hostdetail> ]
 modules: [ <string>: <module> ]
+[ platforms: [ <string>: <platforms> ] ]
 [ redfish_client: <redfish_client> ]
 ```
 
@@ -36,6 +37,8 @@ Tuning for the underlying Redfish (gofish) client. Every key is optional and sho
 ```
 
 Any key may also be set from the environment as `REDFISH_CLIENT_<KEY>`, prefixed further if `--config.env-prefix` is given — e.g. `REDFISH_CLIENT_LOGOUT_TIMEOUT=5s`.
+
+Within one scrape, a GET of a URL another collector has already fetched is answered from that response, so a resource several collectors read costs the BMC one request. Only successful responses up to 256 KiB are kept, and nothing outlives the scrape.
 
 ### Timeouts and session teardown
 
@@ -96,6 +99,33 @@ Nothing is retried after a delete the BMC accepted: a second `DELETE` would targ
 
 **Known limitation.** If a session creation reaches the BMC but the exporter stops waiting before reading the response, the BMC may create a session whose identifier arrives in a response header the exporter never read. Nothing can delete that session, and it is not counted by the metric above, because no teardown is ever attempted for it. It is released by the BMC's own idle timeout. The `failed to create redfish session` log line marks the scrapes where this may have happened.
 
+## `<platforms>`
+[source](../internal/collector/platform.go)
+
+A platform is one server type, keyed `<server_sku>-<firmware_version>`. A scrape names its platform with the `platform` HTTP query parameter, and the exporter reads that BMC the way the platform's row in its platform table says. This repository ships only the `default` row. The design, and how rows for other server types are built in, is in [platforms.md](platforms.md).
+
+``` yaml
+platforms:
+  <server_sku>-<firmware_version>:
+    # Modules a scrape that names this platform runs. They replace any module parameters
+    # on the request. Each must be defined under modules:, and the list must not be empty.
+    modules: [ <module_name>, ... ]
+```
+
+The block is optional: a request whose platform has no entry runs its own `module` parameters. Keys are compared case-insensitively.
+
+```
+/redfish?target=192.0.2.1&group=secure&platform=EXAMPLE-SKU-1.02.03
+```
+
+A `platform` the exporter's table does not know runs as `default`, logs a warning and increments `redfish_exporter_unknown_platforms_requested_total`. A `platforms:` key the table does not know is logged at error level when the config is loaded. Every scrape reports what it ran as:
+
+```
+# HELP redfish_exporter_platform_info The platform this scrape ran as, and the platform the request named: requested is empty when the request named none, and platform is default when it named one the exporter's table does not know.
+# TYPE redfish_exporter_platform_info gauge
+redfish_exporter_platform_info{platform="default",requested=""} 1
+```
+
 ## `<module>`
 Users of `blackbox_exporter` will be familiar with the concept of [modules (aka probers)](https://github.com/prometheus/blackbox_exporter/blob/master/CONFIGURATION.md#module).
 Since `v0.2.0-alpha` released in October 2025, this fork of the redfish_exporter supports a similar concept.
@@ -103,6 +133,8 @@ With modules, users may enable only certain bits of collector behavior, tailorin
 As an example, a host without GPUs wouldn't want to spend network round-trips using the `gpu_collector` prober module, and that may be left out on the client (Prometheus) end.
 
 **Note:** To retain backwards compatibility, the redfish_exporter will default to probing a system using all collectors below except the JSON collector. If this is not desired behavior, users must define a `modules:` configuration in the redfish_exporter, and specify one or more `module` HTTP query parameters on the client end.
+
+The `module` parameter may be repeated, and each value may list several modules separated by commas: `module=chassis,gpu` runs the same collectors as `module=chassis&module=gpu`. A scrape job that chooses a host's modules with a relabel rule needs the comma form, because a rule sets one value.
 
 **In a future release, users will be required to specify modules in the exporter and client**
 
@@ -130,6 +162,7 @@ One of:
 - `manager_collector`
 - `system_collector`
 - `telemetry_collector`
+- `powershelf_collector`
 
 ### `<chassis_collector>`
 [source](../collector/chassis_collector.go)

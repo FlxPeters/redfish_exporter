@@ -24,10 +24,26 @@ type ContextAwareCollector interface {
 	Describe(ch chan<- *prometheus.Desc)
 }
 
-// Collector creates and returns a prometheus.Collector from the Module, based on the Prober.
+// NewCollectorFromModule creates and returns a prometheus.Collector from the Module, based on
+// the Prober, and hands it the platform's cells when it routes any read by platform.
 // Both redfish client and logger are common dependencies for any redfish_exporter collector,
 // and must be provided as inputs.
-func NewCollectorFromModule(moduleName string, m *config.Module, rfClient *gofish.APIClient, logger *slog.Logger) (ContextAwareCollector, error) {
+func NewCollectorFromModule(moduleName string, m *config.Module, rfClient *gofish.APIClient, logger *slog.Logger, platform Platform) (ContextAwareCollector, error) {
+	construct := newCollectorFromModule
+	if override, ok := platform.Collectors[m.Prober]; ok {
+		construct = override
+	}
+	c, err := construct(moduleName, m, rfClient, logger)
+	if err != nil {
+		return nil, err
+	}
+	if aware, ok := c.(PlatformAware); ok {
+		aware.SetPlatform(platform)
+	}
+	return c, nil
+}
+
+func newCollectorFromModule(moduleName string, m *config.Module, rfClient *gofish.APIClient, logger *slog.Logger) (ContextAwareCollector, error) {
 	switch m.Prober {
 	case "chassis_collector":
 		return NewChassisCollector(moduleName, rfClient, logger, m.ChassisCollector)

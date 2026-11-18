@@ -1,4 +1,4 @@
-.PHONY: benchmark build test mock-test capture clean help lint fmt fmt-check gotests unit-test integration-test coverage check ci perf-mock perf-live perf-help validate-live serve-live
+.PHONY: benchmark build test mock-test capture clean help lint fmt fmt-check gotests unit-test platform-examples-test integration-test coverage check ci perf-mock perf-live perf-help validate-live serve-live
 
 # Default target
 help:
@@ -6,6 +6,7 @@ help:
 	@echo "  build       - Build the redfish_exporter binary"
 	@echo "  test        - Run all tests"
 	@echo "  unit-test   - Run unit tests only"
+	@echo "  platform-examples-test - Run the tests with the example rows in the platform table"
 	@echo "  integration-test - Run integration tests"
 	@echo "  lint        - Run golangci-lint"
 	@echo "  fmt         - Format code with gofmt"
@@ -128,6 +129,10 @@ clean:
 unit-test:
 	go test -v -race -count=1 ./...
 
+# Run the tests with the example rows in the platform table
+platform-examples-test:
+	go test -race -count=1 -tags platform_examples ./internal/...
+
 # Run integration tests
 integration-test:
 	go test -v -run Integration ./internal/collector
@@ -135,6 +140,7 @@ integration-test:
 # Run linter
 lint:
 	golangci-lint run ./...
+	golangci-lint run --build-tags platform_examples ./internal/...
 
 # Format code
 fmt:
@@ -154,7 +160,7 @@ coverage:
 check: fmt lint test
 
 # CI workflow - stricter checks
-ci: fmt-check lint test build
+ci: fmt-check lint test platform-examples-test build
 
 # Performance analysis against mock server
 perf-mock:

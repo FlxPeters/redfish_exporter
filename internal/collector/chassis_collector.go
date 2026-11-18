@@ -8,6 +8,7 @@ import (
 	"math"
 	"path"
 	"strings"
+	"sync"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stmcginnis/gofish"
@@ -46,6 +47,26 @@ type ChassisCollector struct {
 	metrics               map[string]Metric
 	logger                *slog.Logger
 	collectorScrapeStatus *prometheus.GaugeVec
+	// power is the platform's chassis power read; see Platform.
+	power func(*ChassisCollector, chan<- prometheus.Metric, *schemas.Chassis, *slog.Logger)
+	// sensors is the platform's chassis Sensors read; see Platform.
+	sensors func(*ChassisCollector, chan<- prometheus.Metric, *schemas.Chassis, *slog.Logger)
+	// leakDetection is the platform's ThermalSubsystem leak detector read; see Platform.
+	leakDetection func(*ChassisCollector, *schemas.ThermalSubsystem, *slog.Logger) []*schemas.LeakDetector
+	// temperatures is the platform's ThermalSubsystem temperature read; see Platform.
+	temperatures func(*ChassisCollector, chan<- prometheus.Metric, string, *schemas.ThermalSubsystem, *slog.Logger)
+	// chassisList is the platform's read of the chassis to walk; see Platform.
+	chassisList func(*ChassisCollector) ([]*schemas.Chassis, error)
+	// written keys the series cells wrote through writeOnce. A collector serves one scrape.
+	written sync.Map
+}
+
+// writeOnce reports whether this scrape has not yet written key, and records it. A cell that
+// can meet the same series in the reads of two chassis writes it only when writeOnce is true,
+// since a repeated series fails the scrape.
+func (c *ChassisCollector) writeOnce(key string) bool {
+	_, seen := c.written.LoadOrStore(key, true)
+	return !seen
 }
 
 func createChassisMetricMap() map[string]Metric {
@@ -131,7 +152,26 @@ func NewChassisCollector(collectorName string, redfishClient *gofish.APIClient, 
 			},
 			[]string{"collector"},
 		),
+		power:         Default.ChassisPower,
+		sensors:       Default.ChassisSensors,
+		leakDetection: Default.ChassisLeakDetection,
+		temperatures:  Default.ChassisTemperatures,
+		chassisList:   Default.ChassisList,
 	}, nil
+}
+
+// SetPlatform takes the cells this collector routes on.
+func (c *ChassisCollector) SetPlatform(p Platform) {
+	c.power = p.ChassisPower
+	c.sensors = p.ChassisSensors
+	c.leakDetection = p.ChassisLeakDetection
+	c.temperatures = p.ChassisTemperatures
+	c.chassisList = p.ChassisList
+}
+
+// listChassis reads every chassis the service lists.
+func (c *ChassisCollector) listChassis() ([]*schemas.Chassis, error) {
+	return c.redfishClient.Service.Chassis()
 }
 
 func (c *ChassisCollector) CollectWithContext(ctx context.Context, ch chan<- prometheus.Metric) {
@@ -149,14 +189,13 @@ func (c *ChassisCollector) collect(ctx context.Context, ch chan<- prometheus.Met
 		return
 	}
 	logger := c.logger.With(slog.String("collector", "ChassisCollector"))
-	service := c.redfishClient.Service
 
 	if ctx.Err() != nil {
 		c.logger.With("error", ctx.Err(), "collector", "chassis").Debug("skipping collection")
 		return
 	}
 	// get a list of chassis from service
-	chassises, err := service.Chassis()
+	chassises, err := c.chassisList(c)
 	if err != nil {
 		// A collection error means some member failed, not that none of them arrived:
 		// gofish still returns the chassis it did fetch. Discarding those made one flaky
@@ -214,27 +253,8 @@ func (c *ChassisCollector) collect(ctx context.Context, ch chan<- prometheus.Met
 			c.collectThermalSubsystem(ctx, ch, chassisID, chassisThermalSubsystem, chassisLogger)
 		}
 
-		chassisPowerInfo, err := chassis.Power()
-		if err != nil {
-			chassisLogger.Error("error getting power data from chassis", slog.String("operation", "chassis.Power()"), slog.Any("error", err))
-		} else if chassisPowerInfo == nil {
-			chassisLogger.Info("no power data found", slog.String("operation", "chassis.Power()"))
-		} else {
-			// power voltages
-			for _, chassisPowerInfoVoltage := range chassisPowerInfo.Voltages {
-				parseChassisPowerInfoVoltage(ch, chassisID, chassisPowerInfoVoltage)
-			}
-
-			// power control
-			for _, chassisPowerInfoPowerControl := range chassisPowerInfo.PowerControl {
-				parseChassisPowerInfoPowerControl(ch, chassisID, chassisPowerInfoPowerControl)
-			}
-
-			// powerSupply
-			for _, chassisPowerInfoPowerSupply := range chassisPowerInfo.PowerSupplies {
-				parseChassisPowerInfoPowerSupply(ch, chassisID, chassisPowerInfoPowerSupply)
-			}
-		}
+		c.power(c, ch, chassis, chassisLogger)
+		c.sensors(c, ch, chassis, chassisLogger)
 
 		// process NetworkAdapter
 		networkAdapters, err := chassis.NetworkAdapters()
@@ -333,24 +353,13 @@ func (c *ChassisCollector) collectThermalSubsystem(ctx context.Context, ch chan<
 	})
 
 	eg.Go(func() error {
-		thermalMetrics, err := thermalSubsystem.ThermalMetrics()
-		if err != nil {
-			logger.Error("error getting thermal metrics from thermal subsystem", slog.String("operation", "thermalSubsystem.ThermalMetrics()"), slog.Any("error", err))
-			return nil
-		}
-		if thermalMetrics == nil {
-			logger.Info("no thermal metrics found", slog.String("operation", "thermalSubsystem.ThermalMetrics()"))
-			return nil
-		}
-		for i, temperature := range thermalMetrics.TemperatureReadingsCelsius {
-			parseThermalSubsystemTemperature(ch, chassisID, i, temperature)
-		}
+		c.temperatures(c, ch, chassisID, thermalSubsystem, logger)
 		return nil
 	})
 
 	eg.Go(func() error {
 		// NOTE: Handles some odd (maybe even buggy) OEM implementations of LeakDeteactor
-		leakDetectors := c.getLeakDetectors(thermalSubsystem, logger)
+		leakDetectors := c.leakDetection(c, thermalSubsystem, logger)
 		if len(leakDetectors) == 0 {
 			logger.Info("no leak detectors found")
 			return nil
@@ -364,6 +373,27 @@ func (c *ChassisCollector) collectThermalSubsystem(ctx context.Context, ch chan<
 	if err := eg.Wait(); err != nil {
 		logger.Error("goroutine error", slog.Any("error", err))
 	}
+}
+
+// collectThermalMetrics emits the temperatures in a ThermalSubsystem's ThermalMetrics.
+func (*ChassisCollector) collectThermalMetrics(ch chan<- prometheus.Metric, chassisID string, thermalSubsystem *schemas.ThermalSubsystem, logger *slog.Logger) {
+	for i, temperature := range readThermalMetrics(thermalSubsystem, logger) {
+		parseThermalSubsystemTemperature(ch, chassisID, i, temperature)
+	}
+}
+
+// readThermalMetrics returns the temperature readings in a ThermalSubsystem's ThermalMetrics.
+func readThermalMetrics(thermalSubsystem *schemas.ThermalSubsystem, logger *slog.Logger) []schemas.SensorArrayExcerpt {
+	thermalMetrics, err := thermalSubsystem.ThermalMetrics()
+	if err != nil {
+		logger.Error("error getting thermal metrics from thermal subsystem", slog.String("operation", "thermalSubsystem.ThermalMetrics()"), slog.Any("error", err))
+		return nil
+	}
+	if thermalMetrics == nil {
+		logger.Info("no thermal metrics found", slog.String("operation", "thermalSubsystem.ThermalMetrics()"))
+		return nil
+	}
+	return thermalMetrics.TemperatureReadingsCelsius
 }
 
 // thermalSubsystemFans fetches the ThermalSubsystem Fans collection as Fan resources.
@@ -547,6 +577,36 @@ func parseLeakDetector(ch chan<- prometheus.Metric, chassisID string, ld *schema
 		ch <- prometheus.MustNewConstMetric(chassisMetrics["chassis_leak_detector_health"].desc, prometheus.GaugeValue, statusHealth, labelValues...)
 	}
 }
+
+// collectPower reads the chassis' legacy Power resource, when it links one.
+func (c *ChassisCollector) collectPower(ch chan<- prometheus.Metric, chassis *schemas.Chassis, logger *slog.Logger) {
+	chassisID := chassis.ID
+	chassisPowerInfo, err := chassis.Power()
+	if err != nil {
+		logger.Error("error getting power data from chassis", slog.String("operation", "chassis.Power()"), slog.Any("error", err))
+	} else if chassisPowerInfo == nil {
+		logger.Info("no power data found", slog.String("operation", "chassis.Power()"))
+	} else {
+		// power voltages
+		for _, chassisPowerInfoVoltage := range chassisPowerInfo.Voltages {
+			parseChassisPowerInfoVoltage(ch, chassisID, chassisPowerInfoVoltage)
+		}
+
+		// power control
+		for _, chassisPowerInfoPowerControl := range chassisPowerInfo.PowerControl {
+			parseChassisPowerInfoPowerControl(ch, chassisID, chassisPowerInfoPowerControl)
+		}
+
+		// powerSupply
+		for _, chassisPowerInfoPowerSupply := range chassisPowerInfo.PowerSupplies {
+			parseChassisPowerInfoPowerSupply(ch, chassisID, chassisPowerInfoPowerSupply)
+		}
+	}
+}
+
+// skipSensors reads nothing. A BMC that serves Thermal and Power already emits the fan,
+// temperature and voltage families from them, so a Sensors read would repeat them.
+func (c *ChassisCollector) skipSensors(chan<- prometheus.Metric, *schemas.Chassis, *slog.Logger) {}
 
 func parseChassisPowerInfoVoltage(ch chan<- prometheus.Metric, chassisID string, chassisPowerInfoVoltage schemas.Voltage) {
 	chassisPowerInfoVoltageName := chassisPowerInfoVoltage.Name

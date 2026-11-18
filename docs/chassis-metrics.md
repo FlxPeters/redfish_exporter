@@ -4,6 +4,10 @@ Every metric emitted by `chassis_collector` (`internal/collector/chassis_collect
 Redfish resource each one is read from, and — where that resource is deprecated — what to read
 instead.
 
+This page describes what the `default` platform reads. A row for another platform can read
+these families from a different resource, or leave chassis out; see
+[platforms.md](platforms.md#cells).
+
 All names below are prefixed `redfish_chassis_`. All metrics are gauges. Every family carries
 `chassis_id` (the Redfish `Chassis` `Id`) and, except for the log service family, a `resource`
 label whose value is fixed per family and is listed with each table.
@@ -152,6 +156,8 @@ Sensor naming differs from the deprecated family and is **not** a drop-in substi
 host reports `HGX_GPU_0_TEMP_0`, `HGX_GPU_0_DRAM_0_Temp_0`, `HGX_ProcessorModule_0_Inlet_Temp_0`.
 A selector written against the old names matches nothing here.
 
+A sensor reported by several chassis has one series under each, with the same `sensor_id`.
+
 ### Leak detectors
 
 Source: `Chassis/{id}/ThermalSubsystem/LeakDetection/LeakDetectors/{id}` · `resource="leak_detector"`
@@ -170,9 +176,9 @@ collector tries the standard path first and falls back to the OEM shape
 > `Thermal` and replaced by `PowerSubsystem` plus `EnvironmentMetrics`. See the
 > [Redfish Resource and Schema Guide](https://redfish.dmtf.org/schemas/DSP2046_2020.4.html).
 >
-> **This collector does not read `PowerSubsystem` or `EnvironmentMetrics`.** There is no
-> replacement family to move to, so a BMC that serves only those resources yields no chassis
-> power data at all.
+> **The default does not read `PowerSubsystem` or `EnvironmentMetrics`,** so a BMC that serves
+> only those resources yields no chassis power data unless its platform row names cells that do.
+> See [platforms.md](platforms.md#cells).
 
 ### Power control and voltages
 
@@ -250,7 +256,8 @@ curl -sk -u "$BMC_USER:$BMC_PASS" https://$BMC/redfish/v1/Chassis/1 | jq 'keys'
 ```
 
 `Thermal` and `Power` present means the deprecated families will populate; `ThermalSubsystem`,
-`PowerSubsystem`, `Sensors` and `EnvironmentMetrics` present means they will not.
+`PowerSubsystem`, `Sensors` and `EnvironmentMetrics` present means they will not, unless the
+host's platform row reads those resources instead.
 
 ---
 

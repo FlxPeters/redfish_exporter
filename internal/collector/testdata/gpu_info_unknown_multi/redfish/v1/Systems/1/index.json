@@ -9,14 +9,14 @@
     "Health": "OK"
   },
   "SerialNumber": "S123456",
-  "PartNumber": "SYS-A21GE-NBRT-01-LL014",
+  "PartNumber": "EXAMPLE-MODEL-01",
   "AssetTag": null,
   "IndicatorLED": "Off",
   "LocationIndicatorActive": false,
   "SystemType": "Physical",
   "BiosVersion": "2.4b",
   "Manufacturer": "Supermicro",
-  "Model": "SYS-A21GE-NBRT-01-LL014",
+  "Model": "EXAMPLE-MODEL-01",
   "SKU": "0x12345",
   "UUID": "00000000-0000-0000-0000-foo",
   "ProcessorSummary": {

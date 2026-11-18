@@ -44,3 +44,7 @@ tools/performance-analysis/temp-config.yml
 
 # Claude Code local settings
 .claude/settings.local.json
+
+# Server-type rows compiled in by the private build (-tags private_platforms)
+*_private.go
+*_private_test.go

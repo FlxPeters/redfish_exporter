@@ -9,6 +9,8 @@ Configuration of the redfish_exporter is done via YAML file.
 
 See [CONFIGURATION.md](./docs/CONFIGURATION.md) for details.
 
+Per-server-type routing (the `platforms:` block and the `platform` query parameter) is specified in [docs/platforms.md](./docs/platforms.md).
+
 ## Building
 
 To build the redfish_exporter executable:
